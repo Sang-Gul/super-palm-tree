@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 명언 생성기</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React & ReactDOM CDN -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel CDN: JSX를 브라우저에서 바로 실행할 수 있도록 변환해 줍니다. -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700&display=swap');
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // React 훅 사용을 위해 React에서 useState를 가져옵니다.
+        const { useState } = React;
+
+        // 유틸리티 함수: base64로 인코딩된 데이터를 ArrayBuffer로 디코딩
+        const base64ToArrayBuffer = (base64) => {
+            const binaryString = atob(base64);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        };
+
+        // 유틸리티 함수: PCM 데이터를 WAV 형식 Blob으로 변환
+        const pcmToWav = (pcm, sampleRate) => {
+            const data = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+            let offset = 0;
+
+            function writeString(s) {
+                for (let i = 0; i < s.length; i++) {
+                    data.setUint8(offset + i, s.charCodeAt(i));
+                }
+                offset += s.length;
+            }
+            function writeUint32(i) {
+                data.setUint32(offset, i, true);
+                offset += 4;
+            }
+            function writeUint16(i) {
+                data.setUint16(offset, i, true);
+                offset += 2;
+            }
+
+            writeString('RIFF'); // ChunkID
+            writeUint32(36 + pcm.length * 2); // ChunkSize
+            writeString('WAVE'); // Format
+            writeString('fmt '); // Subchunk1ID
+            writeUint32(16); // Subchunk1Size
+            writeUint16(1); // AudioFormat (1 = PCM)
+            writeUint16(1); // NumChannels
+            writeUint32(sampleRate); // SampleRate
+            writeUint32(sampleRate * 2); // ByteRate
+            writeUint16(2); // BlockAlign
+            writeUint16(16); // BitsPerSample
+            writeString('data'); // Subchunk2ID
+            writeUint32(pcm.length * 2); // Subchunk2Size
+
+            for (let i = 0; i < pcm.length; i++) {
+                data.setInt16(offset, pcm[i], true);
+                offset += 2;
+            }
+
+            return new Blob([data], { type: 'audio/wav' });
+        };
+
+        // 메인 React 컴포넌트
+        const App = () => {
+            const [userThought, setUserThought] = useState('');
+            const [quoteData, setQuoteData] = useState(null);
+            const [isLoading, setIsLoading] = useState(false);
+            const [error, setError] = useState(null);
+            const [isPlaying, setIsPlaying] = useState(false);
+
+            // API 호출: 명언 생성
+            const fetchQuote = async () => {
+                setIsLoading(true);
+                setError(null);
+                setQuoteData(null);
+
+                const prompt = `
+                    사용자의 생각과 유사하거나 지지하는 유명인의 명언 또는 유명 저서의 구절을 찾아주세요.
+                    응답은 다음 JSON 형식으로 제공하고, 모든 필드의 값은 한국어로 작성해 주세요.
+                    - 'sourceType': 출처가 인물인 경우 "person", 책인 경우 "book"으로 지정
+                    - 'quote': 명언
+                    - 'author': 저자/인물 이름
+                    - 'sourceDescription': 구체적인 출처 (예: '1963년 워싱턴 행진에서의 연설')
+                    - 'sourceType'이 "person"이면, 'nationality' (국적), 'field' (분야), 'lifespan' (생존 기간) 필드 추가
+                    - 'sourceType'이 "book"이면, 'bookTitle' (책 제목) 필드 추가
+                    사용자의 생각: "${userThought}"
+                `;
+
+                const payload = {
+                    contents: [{ role: "user", parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: {
+                                "sourceType": { "type": "STRING" },
+                                "quote": { "type": "STRING" },
+                                "author": { "type": "STRING" },
+                                "sourceDescription": { "type": "STRING", "nullable": true },
+                                "nationality": { "type": "STRING", "nullable": true },
+                                "field": { "type": "STRING", "nullable": true },
+                                "lifespan": { "type": "STRING", "nullable": true },
+                                "bookTitle": { "type": "STRING", "nullable": true }
+                            },
+                            required: ["sourceType", "quote", "author", "sourceDescription"]
+                        }
+                    }
+                };
+
+                const apiKey = "";
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+                let retries = 0;
+                const maxRetries = 5;
+                const baseDelay = 1000;
+
+                while (retries < maxRetries) {
+                    try {
+                        const response = await fetch(apiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+
+                        const result = await response.json();
+                        const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                        if (!jsonText) {
+                            throw new Error("API 응답이 올바른 JSON 형식이 아닙니다.");
+                        }
+
+                        const parsedJson = JSON.parse(jsonText);
+                        setQuoteData(parsedJson);
+                        break;
+                    } catch (err) {
+                        console.error("API 호출 중 오류 발생:", err);
+                        retries++;
+                        if (retries < maxRetries) {
+                            const delay = baseDelay * Math.pow(2, retries);
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                        } else {
+                            setError('명언을 찾는 데 실패했습니다. 다시 시도해 주세요.');
+                        }
+                    } finally {
+                        setIsLoading(false);
+                    }
+                }
+            };
+
+            // API 호출: TTS 오디오 생성 및 재생
+            const playQuoteAudio = async (text) => {
+                setIsPlaying(true);
+                try {
+                    const payload = {
+                        contents: [{ parts: [{ text: `차분하고 사려 깊은 톤으로 말해주세요: ${text}` }] }],
+                        generationConfig: {
+                            responseModalities: ["AUDIO"],
+                            speechConfig: {
+                                voiceConfig: {
+                                    prebuiltVoiceConfig: { voiceName: "Rasalgethi" }
+                                }
+                            }
+                        },
+                        model: "gemini-2.5-flash-preview-tts"
+                    };
+
+                    const apiKey = "";
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const audioPart = result?.candidates?.[0]?.content?.parts?.[0];
+                    const audioData = audioPart?.inlineData?.data;
+                    const mimeType = audioPart?.inlineData?.mimeType;
+
+                    if (audioData && mimeType && mimeType.startsWith("audio/")) {
+                        const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+                        const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
+                        const pcmData = base64ToArrayBuffer(audioData);
+                        const pcm16 = new Int16Array(pcmData);
+                        const wavBlob = pcmToWav(pcm16, sampleRate);
+                        const audioUrl = URL.createObjectURL(wavBlob);
+
+                        const audio = new Audio(audioUrl);
+                        audio.play();
+                        audio.onended = () => setIsPlaying(false);
+                    } else {
+                        console.error("오디오 데이터를 찾을 수 없습니다.");
+                        setIsPlaying(false);
+                    }
+                } catch (err) {
+                    console.error("오디오 재생 중 오류 발생:", err);
+                    setIsPlaying(false);
+                }
+            };
+
+            // JSX 렌더링
+            return (
+                <div className="bg-gray-100 min-h-screen p-4 flex items-center justify-center font-sans">
+                    <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-2xl text-center">
+                        <h1 className="text-3xl font-bold mb-6 text-gray-800">
+                            당신의 생각과 비슷한 명언 찾기
+                        </h1>
+                        <p className="mb-6 text-gray-600">
+                            자신의 관점이나 생각을 아래에 입력하면, 그와 유사한 유명인의 명언이나 책의 구절을 찾아드립니다.
+                        </p>
+                        <textarea
+                            className="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-colors duration-200 resize-none"
+                            rows="6"
+                            value={userThought}
+                            onChange={(e) => setUserThought(e.target.value)}
+                            placeholder="예: '실패는 끝이 아니라 성공으로 가는 과정이다.'"
+                        />
+                        <button
+                            onClick={fetchQuote}
+                            disabled={isLoading}
+                            className="w-full bg-indigo-600 text-white font-semibold py-3 px-6 rounded-xl shadow-lg hover:bg-indigo-700 transition-colors duration-200 disabled:bg-indigo-400"
+                        >
+                            {isLoading ? '명언 찾는 중...' : '명언 찾기'}
+                        </button>
+
+                        {error && (
+                            <div className="mt-6 p-4 bg-red-100 text-red-700 rounded-xl">
+                                <p>{error}</p>
+                            </div>
+                        )}
+
+                        {/* 명언 결과 표시 */}
+                        {quoteData && (
+                            <div className="mt-8 p-6 bg-indigo-50 rounded-2xl shadow-inner text-left">
+                                <p className="text-gray-600 italic mb-4 text-lg leading-relaxed">
+                                    "{quoteData.quote}"
+                                </p>
+                                <div className="border-t border-indigo-200 pt-4">
+                                    <p className="text-sm text-gray-500">
+                                        <strong>출처:</strong> {quoteData.sourceDescription}
+                                    </p>
+                                    {quoteData.sourceType === "person" ? (
+                                        <>
+                                            <p className="text-sm text-gray-500">
+                                                <strong>인물:</strong> {quoteData.author}
+                                            </p>
+                                            <p className="text-sm text-gray-500">
+                                                생존 기간: {quoteData.lifespan}
+                                            </p>
+                                            <p className="text-sm text-gray-500">
+                                                국적: {quoteData.nationality}
+                                            </p>
+                                            <p className="text-sm text-gray-500">
+                                                관련 분야: {quoteData.field}
+                                            </p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <p className="text-sm text-gray-500">
+                                                <strong>저자:</strong> {quoteData.author}
+                                            </p>
+                                            <p className="text-sm text-gray-500">
+                                                <strong>책명:</strong> {quoteData.bookTitle}
+                                            </p>
+                                        </>
+                                    )}
+                                </div>
+                                <button
+                                    onClick={() => playQuoteAudio(quoteData.quote)}
+                                    disabled={isPlaying}
+                                    className="mt-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-indigo-400"
+                                >
+                                    {isPlaying ? (
+                                        <>
+                                            <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            <span>재생 중...</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
+                                            </svg>
+                                            <span>명언 듣기</span>
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // React 앱을 DOM에 렌더링합니다.
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
