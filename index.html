@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 명언 생성기</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700&display=swap');
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="app" class="bg-white p-8 rounded-2xl shadow-xl w-full max-w-2xl text-center">
+        <h1 class="text-3xl font-bold mb-6 text-gray-800">당신의 생각과 비슷한 명언 찾기</h1>
+        <p class="mb-6 text-gray-600">자신의 관점이나 생각을 아래에 입력하면, 그와 유사한 유명인의 명언이나 책의 구절을 찾아드립니다.</p>
+        <textarea id="user-thought" class="w-full p-4 mb-4 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-colors duration-200 resize-none" rows="6" placeholder="예: '실패는 끝이 아니라 성공으로 가는 과정이다.'"></textarea>
+        <button id="find-quote-btn" class="w-full bg-indigo-600 text-white font-semibold py-3 px-6 rounded-xl shadow-lg hover:bg-indigo-700 transition-colors duration-200">명언 찾기</button>
+        
+        <!-- 로딩 및 결과 영역 -->
+        <div id="loading-spinner" class="hidden mt-6">
+            <div class="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] text-indigo-600 motion-reduce:animate-[spin_1.5s_linear_infinite]" role="status">
+                <span class="!absolute !-m-px !h-px !w-px !overflow-hidden !whitespace-nowrap !border-0 !p-0 ![clip:rect(0,0,0,0)]">Loading...</span>
+            </div>
+            <p class="mt-2 text-gray-500">명언 찾는 중...</p>
+        </div>
+        <div id="error-message" class="hidden mt-6 p-4 bg-red-100 text-red-700 rounded-xl"></div>
+        <div id="quote-result" class="hidden mt-8 p-6 bg-indigo-50 rounded-2xl shadow-inner text-left"></div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const userThoughtEl = document.getElementById('user-thought');
+            const findQuoteBtn = document.getElementById('find-quote-btn');
+            const loadingSpinner = document.getElementById('loading-spinner');
+            const errorMessageEl = document.getElementById('error-message');
+            const quoteResultEl = document.getElementById('quote-result');
+
+            const fetchQuote = async () => {
+                const userThought = userThoughtEl.value.trim();
+
+                if (!userThought) {
+                    errorMessageEl.textContent = '명언을 찾을 내용을 입력해주세요.';
+                    errorMessageEl.classList.remove('hidden');
+                    return;
+                }
+
+                findQuoteBtn.disabled = true;
+                loadingSpinner.classList.remove('hidden');
+                errorMessageEl.classList.add('hidden');
+                quoteResultEl.classList.add('hidden');
+
+                const prompt = `
+                    사용자의 생각과 유사하거나 지지하는 유명인의 명언 또는 유명 저서의 구절을 찾아주세요.
+                    응답은 다음 JSON 형식으로 제공하고, 모든 필드의 값은 한국어로 작성해 주세요.
+                    - 'sourceType': 출처가 인물인 경우 "person", 책인 경우 "book"으로 지정
+                    - 'quote': 명언
+                    - 'author': 저자/인물 이름
+                    - 'sourceDescription': 구체적인 출처 (예: '1963년 워싱턴 행진에서의 연설')
+                    - 'sourceType'이 "person"이면, 'nationality' (국적), 'field' (분야), 'lifespan' (생존 기간) 필드 추가
+                    - 'sourceType'이 "book"이면, 'bookTitle' (책 제목) 필드 추가
+                    사용자의 생각: "${userThought}"
+                `;
+                
+                const payload = {
+                    contents: [{ role: "user", parts: [{ text: prompt }] }],
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: {
+                                "sourceType": { "type": "STRING" },
+                                "quote": { "type": "STRING" },
+                                "author": { "type": "STRING" },
+                                "sourceDescription": { "type": "STRING", "nullable": true },
+                                "nationality": { "type": "STRING", "nullable": true },
+                                "field": { "type": "STRING", "nullable": true },
+                                "lifespan": { "type": "STRING", "nullable": true },
+                                "bookTitle": { "type": "STRING", "nullable": true }
+                            },
+                            required: ["sourceType", "quote", "author", "sourceDescription"]
+                        }
+                    }
+                };
+                
+                // IMPORTANT: 이곳에 발급받은 API 키를 넣어주세요.
+                const apiKey = "AIzaSyCySKIGhUWt7cQ9wpDJgrbkSm3ik1pKuF8";
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+                
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+
+                    const result = await response.json();
+                    const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                    if (!jsonText) {
+                        throw new Error("API 응답이 올바른 JSON 형식이 아닙니다.");
+                    }
+
+                    const parsedJson = JSON.parse(jsonText);
+                    renderQuoteResult(parsedJson);
+                } catch (err) {
+                    errorMessageEl.textContent = '명언을 찾는 데 실패했습니다. 다시 시도해 주세요.';
+                    errorMessageEl.classList.remove('hidden');
+                    console.error("최종 API 호출 실패:", err);
+                } finally {
+                    findQuoteBtn.disabled = false;
+                    loadingSpinner.classList.add('hidden');
+                }
+            };
+            
+            const renderQuoteResult = (quoteData) => {
+                const { quote, author, sourceType, nationality, field, lifespan, bookTitle, sourceDescription } = quoteData;
+
+                const details = sourceType === "person" ?
+                    `
+                    <p class="text-sm text-gray-500"><strong>인물:</strong> ${author}</p>
+                    <p class="text-sm text-gray-500">생존 기간: ${lifespan}</p>
+                    <p class="text-sm text-gray-500">국적: ${nationality}</p>
+                    <p class="text-sm text-gray-500">관련 분야: ${field}</p>
+                    ` :
+                    `
+                    <p class="text-sm text-gray-500"><strong>저자:</strong> ${author}</p>
+                    <p class="text-sm text-gray-500"><strong>책명:</strong> ${bookTitle}</p>
+                    `;
+
+                quoteResultEl.innerHTML = `
+                    <p class="text-gray-600 italic mb-4 text-lg leading-relaxed">"${quote}"</p>
+                    <div class="border-t border-indigo-200 pt-4">
+                        <p class="text-sm text-gray-500"><strong>출처:</strong> ${sourceDescription}</p>
+                        ${details}
+                    </div>
+                `;
+                quoteResultEl.classList.remove('hidden');
+            };
+
+            findQuoteBtn.addEventListener('click', fetchQuote);
+        });
+    </script>
+</body>
+</html>
